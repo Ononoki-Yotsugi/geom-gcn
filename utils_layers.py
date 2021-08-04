@@ -24,6 +24,7 @@ import dgl.function as fn
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm
 
 
 # Adapted from https://docs.dgl.ai/tutorials/models/1_gnn/1_gcn.html
@@ -147,28 +148,32 @@ class GeomGCNSingleChannel(nn.Module):
         self.out_feats = out_feats
 
     def get_subgraphs(self, g):
+        # 得到9个列表，每个列表存储相应的边的id
         subgraph_edge_list = [[] for _ in range(self.num_divisions)]
         u, v, eid = g.all_edges(form='all')
-        for i in range(g.number_of_edges()):
+        for i in tqdm(range(g.number_of_edges())):
             subgraph_edge_list[g.edges[u[i], v[i]].data['subgraph_idx']].append(eid[i])
 
         return subgraph_edge_list
 
     def forward(self, feature):
-        in_feats_dropout = self.in_feats_dropout(feature)
+        in_feats_dropout = self.in_feats_dropout(feature)   # 为什么在这里就dropout了？
         self.g.ndata['h'] = in_feats_dropout
 
+        results_from_subgraph_list = []
+
         for i in range(self.num_divisions):
-            subgraph = self.g.edge_subgraph(self.subgraph_edge_list_of_list[i])
-            subgraph.copy_from_parent()
+            subgraph = self.g.edge_subgraph(self.subgraph_edge_list_of_list[i], preserve_nodes=True)
+            #subgraph.copy_from_parent()
             subgraph.ndata[f'Wh_{i}'] = self.linear_for_each_division[i](subgraph.ndata['h']) * subgraph.ndata['norm']
             subgraph.update_all(message_func=fn.copy_u(u=f'Wh_{i}', out=f'm_{i}'),
                                 reduce_func=fn.sum(msg=f'm_{i}', out=f'h_{i}'))
             subgraph.ndata.pop(f'Wh_{i}')
-            subgraph.copy_to_parent()
+            #subgraph.copy_to_parent()
+            results_from_subgraph_list.append(subgraph.ndata.pop(f'h_{i}'))
 
         self.g.ndata.pop('h')
-        
+        '''
         results_from_subgraph_list = []
         for i in range(self.num_divisions):
             if f'h_{i}' in self.g.node_attr_schemes():
@@ -176,7 +181,7 @@ class GeomGCNSingleChannel(nn.Module):
             else:
                 results_from_subgraph_list.append(
                     th.zeros((feature.size(0), self.out_feats), dtype=th.float32, device=feature.device))
-
+        '''
         if self.merge == 'cat':
             h_new = th.cat(results_from_subgraph_list, dim=-1)
         else:
@@ -185,7 +190,7 @@ class GeomGCNSingleChannel(nn.Module):
         h_new = self.activation(h_new)
         return h_new
 
-
+# 虽说有多个通道的设置，但是根本用不到，num_heads永远是1
 class GeomGCN(nn.Module):
     def __init__(self, g, in_feats, out_feats, num_divisions, activation, num_heads, dropout_prob, ggcn_merge,
                  channel_merge):

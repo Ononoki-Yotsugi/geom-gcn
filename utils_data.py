@@ -27,8 +27,10 @@ import networkx as nx
 import numpy as np
 import scipy.sparse as sp
 import torch as th
-from dgl import DGLGraph
+import dgl
 from sklearn.model_selection import ShuffleSplit
+import torch
+from tqdm import tqdm
 
 import utils
 
@@ -37,10 +39,10 @@ def load_data(dataset_name, splits_file_path=None, train_percentage=None, val_pe
               embedding_method=None,
               embedding_method_graph=None, embedding_method_space=None):
     if dataset_name in {'cora', 'citeseer', 'pubmed'}:
-        adj, features, labels, _, _, _ = utils.load_data(dataset_name)
-        labels = np.argmax(labels, axis=-1)
+        adj, features, labels, _, _, _ = utils.load_data(dataset_name)   # 这里不关心后面的划分，估计是要重新划分
+        labels = np.argmax(labels, axis=-1)   # 从one-hot转换为正常标签
         features = features.todense()
-        G = nx.DiGraph(adj)
+        G = nx.DiGraph(adj)   # 构建一个图
     else:
         graph_adjacency_list_file_path = os.path.join('new_data', dataset_name, 'out1_graph_edges.txt')
         graph_node_features_and_labels_file_path = os.path.join('new_data', dataset_name,
@@ -90,10 +92,10 @@ def load_data(dataset_name, splits_file_path=None, train_percentage=None, val_pe
         labels = np.array(
             [label for _, label in sorted(G.nodes(data='label'), key=lambda x: x[0])])
 
-    features = utils.preprocess_features(features)
+    features = utils.preprocess_features(features)   # 归一化特征
 
     if not embedding_mode:
-        g = DGLGraph(adj + sp.eye(adj.shape[0]))
+        g = dgl.from_scipy(adj + sp.eye(adj.shape[0]))   # 加上对角阵构建一个图，起到的作用应该类似于我们代码里的加上自环
     else:
         if embedding_mode == 'ExperimentTwoAll':
             embedding_file_path = os.path.join('embedding_method_combinations_all',
@@ -119,19 +121,23 @@ def load_data(dataset_name, splits_file_path=None, train_percentage=None, val_pe
                 if G.has_edge(int(line[0]), int(line[1])):
                     G.remove_edge(int(line[0]), int(line[1]))
                 G.add_edge(int(line[0]), int(line[1]), subgraph_idx=space_and_relation_type_to_idx_dict[
-                    (line[2], int(line[3]))])
+                    (line[2], int(line[3]))])   # 构建8个子图
 
         space_and_relation_type_to_idx_dict['self_loop'] = len(space_and_relation_type_to_idx_dict)
         for node in sorted(G.nodes()):
             if G.has_edge(node, node):
                 G.remove_edge(node, node)
-            G.add_edge(node, node, subgraph_idx=space_and_relation_type_to_idx_dict['self_loop'])
-        adj = nx.adjacency_matrix(G, sorted(G.nodes()))
-        g = DGLGraph(adj)
+            G.add_edge(node, node, subgraph_idx=space_and_relation_type_to_idx_dict['self_loop'])   # 最后加上自环，就是9个子图
 
-        for u, v, feature in G.edges(data='subgraph_idx'):
-            g.edges[g.edge_id(u, v)].data['subgraph_idx'] = th.tensor([feature])
-
+        #adj = nx.adjacency_matrix(G, sorted(G.nodes()))
+        g = dgl.from_networkx(G,edge_attrs=['subgraph_idx'])
+        # 我用上面这一行代替了下面的
+        '''
+        for u, v, feature in tqdm(G.edges(data='subgraph_idx')):
+            g.edges[g.edge_ids(u, v)].data['subgraph_idx'] = th.tensor([feature])   # 把边的类型也加进去
+        # 现在得到了一个g,但是这不是默认不会出现既存在于graph中、又存在于latent space中的边吗？
+        '''
+    # 重新得到划分
     if splits_file_path:
         with np.load(splits_file_path) as splits_file:
             train_mask = splits_file['train_mask']
@@ -196,9 +202,15 @@ def load_data(dataset_name, splits_file_path=None, train_percentage=None, val_pe
     test_mask = th.BoolTensor(test_mask)
 
     # Adapted from https://docs.dgl.ai/tutorials/models/1_gnn/1_gcn.html
+    '''
+    print(g.device)
+    print(features.device)
+    g=g.to('cuda:0')   # 我加的
+    '''
+    g=g.to(torch.device('cuda:0'))   # 我加的
     degs = g.in_degrees().float()
     norm = th.pow(degs, -0.5).cuda()
-    norm[th.isinf(norm)] = 0
+    norm[th.isinf(norm)] = 0   # 去掉了cuda()
     g.ndata['norm'] = norm.unsqueeze(1)
 
     return g, features, labels, train_mask, val_mask, test_mask, num_features, num_labels
